@@ -1,0 +1,9 @@
+obj-m += template.o
+
+# Objects that make up the module (paths relative to this src/ dir).
+# Add files here for a multi-file module:
+#   template-y += foo.o bar.o
+template-y := main.o
+
+# Header search path (so src/*.c can #include "foo.h" from this dir)
+ccflags-y := -I$(src)

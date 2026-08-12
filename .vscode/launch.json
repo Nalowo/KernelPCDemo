@@ -1,0 +1,59 @@
+{
+  // Kernel-module debugging over QEMU's gdbstub.
+  // Prerequisite: extension ms-vscode.cpptools (installed in the WSL remote).
+  //
+  // setupCommands notes:
+  //  - cppdbg runs these BEFORE loading the program's symbols, so we `file` the
+  //    vmlinux ourselves before sourcing vmlinux-gdb.py (else "No symbol table").
+  //  - `break do_init_module` is pre-armed here so that after F5 the debugger
+  //    stops on the next insmod on its own -- no need to manually pause.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Recommended, robust flow. Run `make qemu-debug` in a terminal FIRST
+      // (QEMU starts paused on :1234), then press F5.
+      "name": "Kernel: attach to QEMU",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/devtools/.cache/kernel-build/vmlinux",
+      "miDebuggerServerAddress": "localhost:1234",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "setupCommands": [
+        { "text": "set confirm off" },
+        { "text": "set pagination off" },
+        { "text": "set architecture i386:x86-64" },
+        { "text": "set auto-load safe-path /" },
+        { "text": "file ${workspaceFolder}/devtools/.cache/kernel-build/vmlinux" },
+        { "text": "source ${workspaceFolder}/devtools/.cache/kernel-build/vmlinux-gdb.py" },
+        { "text": "break do_init_module" }
+      ]
+    },
+    {
+      // Optional one-button flow: builds, boots QEMU paused, then attaches.
+      // Relies on a background-task matcher that can be finicky across VS Code
+      // versions; prefer the attach config above if it misbehaves.
+      "name": "Kernel: build, boot & attach",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/devtools/.cache/kernel-build/vmlinux",
+      "miDebuggerServerAddress": "localhost:1234",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "preLaunchTask": "qemu-debug",
+      "setupCommands": [
+        { "text": "set confirm off" },
+        { "text": "set pagination off" },
+        { "text": "set architecture i386:x86-64" },
+        { "text": "set auto-load safe-path /" },
+        { "text": "file ${workspaceFolder}/devtools/.cache/kernel-build/vmlinux" },
+        { "text": "source ${workspaceFolder}/devtools/.cache/kernel-build/vmlinux-gdb.py" },
+        { "text": "break do_init_module" }
+      ]
+    }
+  ]
+}

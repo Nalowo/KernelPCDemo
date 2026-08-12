@@ -1,0 +1,35 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // Used by the "Kernel: build, boot & attach" launch config.
+      // Signals "ready" to the debugger when boot.sh prints "QEMU paused".
+      "label": "qemu-debug",
+      "type": "shell",
+      "command": "make qemu-debug",
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^(.*)$", "file": 1, "location": 1, "message": 1 },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Building module against kernel",
+          "endsPattern": "QEMU paused"
+        }
+      },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "qemu-build",
+      "type": "shell",
+      "command": "make qemu-build",
+      "problemMatcher": ["$gcc"],
+      "group": "build"
+    },
+    {
+      "label": "compdb",
+      "type": "shell",
+      "command": "make compdb",
+      "problemMatcher": []
+    }
+  ]
+}

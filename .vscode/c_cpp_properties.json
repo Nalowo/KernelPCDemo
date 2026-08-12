@@ -1,0 +1,26 @@
+{
+    "configurations": [
+        {
+            "name": "Linux Kernel Module",
+            "compileCommands": "${workspaceFolder}/.vscode/compile_commands.json",
+
+            // Явно укажи компилятор сборки — тогда расширение подтянет
+            // встроенные определения и __builtin_* gcc и перестанет ругаться
+            // на _Static_assert внутри MODULE_LICENSE. Должен совпадать с тем,
+            // чем реально собирается ядро (gcc на Debian; clang при LLVM=1).
+            "compilerPath": "/usr/bin/gcc",
+
+            "cStandard": "gnu11",
+            "intelliSenseMode": "linux-gcc-x64"
+
+            // Применяется ТОЛЬКО IntelliSense, на `make` не влияет
+            // (реальная сборка идёт мимо этого файла). Гасит ложную
+            // ошибку парсера "expression must have integral type"
+            // в _Static_assert ядерных макросов.
+            // "forcedInclude": [
+            //     "${workspaceFolder}/.vscode/ide_shim.h"
+            // ]
+        }
+    ],
+    "version": 4
+}

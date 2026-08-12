@@ -1,0 +1,22 @@
+{
+  // Portable settings only (no absolute paths). Safe to commit.
+
+  // Feed IntelliSense from the bear-generated DB when present (run: make compdb).
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/.vscode/compile_commands.json",
+  "C_Cpp.default.cStandard": "gnu11",
+
+  // Kernel sources are C, not C++.
+  "files.associations": {
+    "*.h": "c",
+    "Kbuild": "makefile",
+    "*.config": "properties"
+  },
+
+  // Match kernel style (tabs). `make format` uses clang-format for the real pass.
+  "[c]": {
+    "editor.insertSpaces": false,
+    "editor.tabSize": 8
+  },
+
+  "files.trimTrailingWhitespace": true
+}

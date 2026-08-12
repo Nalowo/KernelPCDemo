@@ -1,0 +1,50 @@
+#!/bin/sh
+# PID 1 for the QEMU dev guest.
+# Mounts core filesystems, shares the host project via 9p, then either drops to
+# an interactive shell or runs a test command passed on the kernel cmdline.
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+mount -t tmpfs tmpfs /tmp
+
+# Share host project root via 9p virtfs.
+mkdir -p /mnt/host
+if ! mount -t 9p -o trans=virtio,version=9p2000.L host /mnt/host 2>/dev/null; then
+	echo "WARNING: 9p mount failed; /mnt/host will be empty."
+fi
+
+# Test mode: boot.sh passes the command base64-encoded as kmod.cmd64= to
+# survive kernel cmdline word-splitting. Decode and run it, then power off.
+TESTCMD=""
+for arg in $(cat /proc/cmdline); do
+	case "$arg" in
+		kmod.cmd64=*) TESTCMD=$(echo "${arg#kmod.cmd64=}" | base64 -d) ;;
+	esac
+done
+
+if [ -n "$TESTCMD" ]; then
+	echo "=== test mode ==="
+	/bin/sh -c "$TESTCMD"
+	RESULT=$?
+	echo "=== test exited with code $RESULT ==="
+	poweroff -f
+	exit "$RESULT"
+fi
+
+echo "================================================"
+echo "  QEMU dev guest"
+echo "  Project:  /mnt/host/"
+echo "  Module:   /mnt/host/build/*.ko"
+echo "  Try:      insmod /mnt/host/build/template.ko"
+echo "            dmesg | tail"
+echo "            rmmod template"
+echo "  Exit:     poweroff -f"
+echo "================================================"
+export PS1='guest:\w# '
+exec /bin/sh

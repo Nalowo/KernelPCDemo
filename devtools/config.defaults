@@ -1,0 +1,45 @@
+# devtools/config.defaults -- defaults for the QEMU-based dev/debug environment.
+# Override any variable by creating devtools/config.local (gitignored), e.g.:
+#   KERNEL_VERSION="6.12.94"
+#   QEMU_MEM="2G"
+
+# Kernel version. Prefer an LTS/longterm series (6.18, 6.12, 6.6, 6.1): kernel.org
+# keeps those downloadable for years, whereas a regular stable series gets pruned
+# from the CDN once it hits EOL (a plain `stable` pin will 404 in a few months).
+# 6.18 is the current LTS and is >= 6.13, so external modules support MO= output.
+KERNEL_VERSION="${KERNEL_VERSION:-6.18.37}"
+KERNEL_MAJOR="${KERNEL_VERSION%%.*}"
+KERNEL_URL_PRIMARY="https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_MAJOR}.x/linux-${KERNEL_VERSION}.tar.xz"
+KERNEL_URL_GITHUB="https://github.com/gregkh/linux/archive/refs/tags/v${KERNEL_VERSION}.tar.gz"
+
+# Set to 1 to skip the kernel.org CDN and fetch straight from the GitHub mirror.
+# Useful on networks where cdn.kernel.org (Fastly) is filtered/unreachable.
+KERNEL_PREFER_MIRROR="${KERNEL_PREFER_MIRROR:-0}"
+
+# BusyBox (statically linked for the initramfs)
+BUSYBOX_VERSION="${BUSYBOX_VERSION:-1.37.0}"
+BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
+
+# Build paths (everything under .cache to keep the project root clean)
+CACHE_DIR="${CACHE_DIR:-$DEVTOOLS_DIR/.cache}"
+KERNEL_SRC="$CACHE_DIR/linux-${KERNEL_VERSION}"
+KERNEL_BUILD="$CACHE_DIR/kernel-build"
+BUSYBOX_SRC="$CACHE_DIR/busybox-${BUSYBOX_VERSION}"
+INITRAMFS_DIR="$CACHE_DIR/initramfs"
+INITRAMFS_CPIO="$CACHE_DIR/initramfs.cpio.gz"
+
+# 9p share: host project root -> guest mountpoint
+MOUNT_TAG="host"
+GUEST_MNT="/mnt/host"
+
+# QEMU
+QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+QEMU_MEM="${QEMU_MEM:-1G}"
+QEMU_SMP="${QEMU_SMP:-2}"
+QEMU_GDB_PORT="${QEMU_GDB_PORT:-1234}"
+
+# Debug profile: 1 -> also merge devtools/kernel.debug.config (KASAN, kmemleak,
+# lockdep, kprobes...). Off by default for a lean, fast kernel.
+# Enable per-build: `KERNEL_DEBUG=1 make qemu-setup` (or `make qemu-setup-debug`),
+# or persistently by setting KERNEL_DEBUG=1 in devtools/config.local.
+KERNEL_DEBUG="${KERNEL_DEBUG:-0}"

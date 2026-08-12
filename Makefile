@@ -1,9 +1,9 @@
-# Rename the module in TWO places: MODULE_NAME below, and obj-m/template-y in
-# src/Kbuild.
-MODULE_NAME := template
+# Rename the module in TWO places: MODULE_NAME below, and obj-m/<name>-y in
+# ./Kbuild.
+MODULE_NAME := kernel_pc_demo
 
 KDIR     ?= /lib/modules/$(shell uname -r)/build
-SRC      := $(abspath src)
+SRC      := $(abspath .)
 BUILD    := $(abspath build)
 DEVTOOLS := $(abspath devtools)
 

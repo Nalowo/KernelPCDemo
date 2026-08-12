@@ -1,142 +1,109 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Debuggable char-device template.
+ * kernel_pc_demo -- producer/consumer: tasklet vs workqueue.
  *
- * Registers a misc device /dev/template backed by a small in-kernel buffer.
- * The interesting functions (open/read/write/release) live in .text, so
- * breakpoints on them bind cleanly after `lx-symbols` -- unlike __init code in
- * the ephemeral .init.text section. Drive them from the guest:
+ * The producer is an hrtimer callback (top-half) that pushes random values
+ * into a kfifo without ever sleeping; a full fifo means the event is dropped.
+ * The consumer drains the fifo either from a tasklet (atomic context, cannot
+ * sleep) or from a workqueue (process context, may sleep) -- selectable at
+ * runtime via /sys/module/kernel_pc_demo/parameters/consumer_type.
  *
- *     echo hello > /dev/template     # -> template_write
- *     cat /dev/template              # -> template_read
+ * This file owns the module lifecycle: parameter validation, the global
+ * context and the kfifo backing buffer.
  *
- * See README "Отладка" for the full GDB workflow and cases.
+ *     insmod kernel_pc_demo.ko fifo_size=64 num_events=500 interval_us=500
+ *     echo 1 > /sys/module/kernel_pc_demo/parameters/run
+ *     cat   /sys/module/kernel_pc_demo/parameters/result
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/miscdevice.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
-#include <linux/slab.h>
-#include <linux/uaccess.h>
+#include <linux/moduleparam.h>
 
-#define TEMPLATE_BUF_SIZE 1024
+#include "pc_demo.h"
 
-static char *template_buf;		/* backing store */
-static size_t template_len;		/* bytes currently stored */
-static DEFINE_MUTEX(template_lock);	/* serialises access to buf/len */
+struct pc_ctx pc_ctx_global;
 
-static ssize_t template_read(struct file *file, char __user *ubuf,
-			     size_t count, loff_t *ppos)
+/*
+ * Load-time parameters. They are read-only after insmod (0444) and are copied
+ * into the context by pc_init(). consumer_type is *not* here: it needs a
+ * setter (it is writable at runtime), so it lives in params.c.
+ */
+static unsigned int fifo_size = 64;
+module_param(fifo_size, uint, 0444);
+MODULE_PARM_DESC(fifo_size, "kfifo size in slots, power of two, 4..1024 (default 64)");
+
+static unsigned int num_events = 200;
+module_param(num_events, uint, 0444);
+MODULE_PARM_DESC(num_events, "number of events the producer generates, 1..50000 (default 200)");
+
+static unsigned int interval_us = 1000;
+module_param(interval_us, uint, 0444);
+MODULE_PARM_DESC(interval_us, "producer interval in microseconds, 100..1000000 (default 1000)");
+
+static int __init pc_init(void)
 {
-	ssize_t ret;
-
-	/* gdb: `break template_read` -- triggered by `cat /dev/template`. */
-	mutex_lock(&template_lock);
-
-	if (*ppos >= template_len) {
-		ret = 0;			/* EOF */
-		goto out;
-	}
-	if (count > template_len - *ppos)
-		count = template_len - *ppos;
-
-	if (copy_to_user(ubuf, template_buf + *ppos, count)) {
-		ret = -EFAULT;
-		goto out;
-	}
-	*ppos += count;
-	ret = count;
-out:
-	mutex_unlock(&template_lock);
-	return ret;
-}
-
-static ssize_t template_write(struct file *file, const char __user *ubuf,
-			      size_t count, loff_t *ppos)
-{
-	ssize_t ret;
-
-	/* gdb: `break template_write` -- triggered by `echo x > /dev/template`. */
-	if (count > TEMPLATE_BUF_SIZE)
-		count = TEMPLATE_BUF_SIZE;
-
-	mutex_lock(&template_lock);
-
-	if (copy_from_user(template_buf, ubuf, count)) {
-		ret = -EFAULT;
-		goto out;
-	}
-	template_len = count;
-	*ppos = count;
-	ret = count;
-	pr_info("wrote %zd bytes\n", ret);
-out:
-	mutex_unlock(&template_lock);
-	return ret;
-}
-
-static int template_open(struct inode *inode, struct file *file)
-{
-	pr_info("open\n");
-	return 0;
-}
-
-static int template_release(struct inode *inode, struct file *file)
-{
-	pr_info("release\n");
-	return 0;
-}
-
-static const struct file_operations template_fops = {
-	.owner		= THIS_MODULE,
-	.open		= template_open,
-	.release	= template_release,
-	.read		= template_read,
-	.write		= template_write,
-	.llseek		= default_llseek,
-};
-
-static struct miscdevice template_dev = {
-	.minor	= MISC_DYNAMIC_MINOR,
-	.name	= "template",
-	.fops	= &template_fops,
-	.mode	= 0666,
-};
-
-static int __init template_init(void)
-{
+	struct pc_ctx *ctx = &pc_ctx_global;
 	int ret;
 
-	template_buf = kzalloc(TEMPLATE_BUF_SIZE, GFP_KERNEL);
-	if (!template_buf)
-		return -ENOMEM;
-
-	ret = misc_register(&template_dev);
-	if (ret) {
-		kfree(template_buf);
+	/*
+	 * consumer_type has already been set by params.c (module parameters are
+	 * parsed before init), so it is validated but not overwritten here.
+	 */
+	ret = pc_params_validate(fifo_size, num_events, interval_us,
+				 ctx->consumer_type);
+	if (ret)
 		return ret;
+
+	ctx->fifo_size = fifo_size;
+	ctx->num_events = num_events;
+	ctx->interval_us = interval_us;
+
+	mutex_init(&ctx->stats_lock);
+	init_waitqueue_head(&ctx->done);
+	atomic_set(&ctx->running, 0);
+	ctx->last_run_result = PC_OK;
+	pc_stats_reset(ctx);
+
+	/* Dynamic kfifo buffer: fifo_size elements of unsigned int. */
+	ret = kfifo_alloc(&ctx->fifo, ctx->fifo_size, GFP_KERNEL);
+	if (ret) {
+		pr_err("kfifo_alloc(%u) failed: %d\n", ctx->fifo_size, ret);
+		return PC_NOMEM;
 	}
 
-	pr_info("loaded: /dev/%s (minor %d)\n",
-		template_dev.name, template_dev.minor);
-	return 0;
+	/*
+	 * hrtimer_setup() replaces the removed hrtimer_init()+->function pair
+	 * (kernel >= 6.15; this project builds against 6.18).
+	 */
+	hrtimer_setup(&ctx->timer, pc_producer_timer_fn, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
+
+	pr_info("loaded: fifo_size=%u num_events=%u interval_us=%u consumer=%s\n",
+		ctx->fifo_size, ctx->num_events, ctx->interval_us,
+		pc_consumer_name(ctx->consumer_type));
+	return PC_OK;
 }
 
-static void __exit template_exit(void)
+static void __exit pc_exit(void)
 {
-	misc_deregister(&template_dev);
-	kfree(template_buf);
+	struct pc_ctx *ctx = &pc_ctx_global;
+
+	/* Order matters: stop the producer first, then drain/kill the consumer. */
+	pc_producer_stop(ctx);
+	pc_consumer_teardown(ctx);
+	kfifo_free(&ctx->fifo);
+	mutex_destroy(&ctx->stats_lock);
+
 	pr_info("unloaded\n");
 }
 
-module_init(template_init);
-module_exit(template_exit);
+module_init(pc_init);
+module_exit(pc_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nalowo");
-MODULE_DESCRIPTION("Debuggable char-device template");
-MODULE_VERSION("0.2");
+MODULE_DESCRIPTION("Producer/consumer demo: hrtimer + kfifo, tasklet vs workqueue");
+MODULE_VERSION("0.1");

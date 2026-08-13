@@ -1,15 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * module_param_cb interface exported under
- * /sys/module/kernel_pc_demo/parameters/:
- *
- *   run            (w)  echo 1 > run            -- run one test, blocks until
- * done result         (r)  cat result              -- "produced=.. consumed=..
- * dropped=.. consumer=.. ok" stats          (r)  cat stats               --
- * "... sum=.. last=.. avg=.." consumer_type  (rw) echo 1 > consumer_type  -- 0
- * tasklet, 1 workqueue reset          (w)  echo 1 > reset          -- drop
- * queue and counters
- */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/jiffies.h>
@@ -70,20 +59,6 @@ static int pc_parse_trigger(const char *val) {
 }
 
 /* --- run --- */
-
-/*
- * TODO:
- *   1. atomic_cmpxchg(&ctx->running, 0, 1) != 0  -> return PC_BUSY;
- *   2. kfifo_reset(&ctx->fifo); pc_stats_reset(ctx);
- *   3. pc_consumer_setup(ctx)   -- tasklet_init / create_singlethread_workqueue
- *   4. pc_producer_start(ctx)
- *   5. wait_event_timeout(ctx->done,
- *                         pc_total_events(ctx) >= ctx->num_events,
- *                         timeout)  -- timeout from num_events * interval_us
- *                                      plus slack; 0 -> PC_TIMEOUT
- *   6. pc_producer_stop(ctx); pc_consumer_teardown(ctx) (drains the last items)
- *   7. ctx->last_run_result = ...; atomic_set(&ctx->running, 0);
- */
 static int pc_param_run_set(const char *val, const struct kernel_param *kp) {
   struct pc_ctx *ctx = &pc_ctx_global;
   int ret;
@@ -104,12 +79,25 @@ static int pc_param_run_set(const char *val, const struct kernel_param *kp) {
 
   pc_producer_start(ctx);
 
-  int timeout = ctx->num_events * ctx->interval_us /*+ slack*/; // !!
-  int wait_ret = wait_event_interruptible_timeout( // !!
+  u64 timeout_ms;
+  unsigned long timeout;
+  long wait_ret;
+
+  timeout_ms = div_u64((u64)ctx->num_events * ctx->interval_us, USEC_PER_MSEC);
+  timeout = msecs_to_jiffies(timeout_ms + timeout_ms / 2 + 100);
+
+  wait_ret = wait_event_interruptible_timeout(
       ctx->done, pc_total_events(ctx) >= ctx->num_events, timeout);
 
-  (void)ctx;
-  return PC_OK;
+  if (wait_ret < 0)
+    ret = wait_ret;
+  else if (wait_ret == 0)
+    ret = PC_TIMEOUT;
+  else
+    ret = PC_OK;
+
+  pc_producer_stop(ctx);
+  pc_consumer_teardown(ctx);
 
 out_unlock:
   ctx->last_run_result = ret;
@@ -124,19 +112,27 @@ module_param_cb(run, &pc_run_ops, NULL, 0200);
 MODULE_PARM_DESC(run, "write 1 to run one producer/consumer test (blocking)");
 
 /* --- result --- */
-
-/*
- * TODO: "produced=%d consumed=%d dropped=%d consumer=%s ok"
- *       when consumed < produced append " warn: lost=%d";
- *       report ctx->last_run_result when the last run failed.
- */
 static int pc_param_result_get(char *buffer, const struct kernel_param *kp) {
   struct pc_ctx *ctx = &pc_ctx_global;
 
-  return scnprintf(
-      buffer, PAGE_SIZE, "produced=%d consumed=%d dropped=%d consumer=%s ok\n",
-      atomic_read(&ctx->produced), atomic_read(&ctx->consumed),
-      atomic_read(&ctx->dropped), pc_consumer_name(ctx->consumer_type));
+  const int produced = atomic_read(&ctx->produced);
+  const int consumed = atomic_read(&ctx->consumed);
+  int len = scnprintf(buffer, PAGE_SIZE,
+                      "produced=%d consumed=%d dropped=%d consumer=%s",
+                      produced, consumed, atomic_read(&ctx->dropped),
+                      pc_consumer_name(ctx->active_type));
+
+  if (ctx->last_run_result == PC_OK)
+    len += scnprintf(buffer + len, PAGE_SIZE - len, " ok");
+  else
+    len += scnprintf(buffer + len, PAGE_SIZE - len, " error=%d",
+                     ctx->last_run_result);
+
+  if (consumed < produced)
+    len += scnprintf(buffer + len, PAGE_SIZE - len, " warn: lost=%d",
+                     produced - consumed);
+
+  return len + scnprintf(buffer + len, PAGE_SIZE - len, "\n");
 }
 
 static const struct kernel_param_ops pc_result_ops = {
@@ -146,20 +142,20 @@ module_param_cb(result, &pc_result_ops, NULL, 0444);
 MODULE_PARM_DESC(result, "result of the last run");
 
 /* --- stats --- */
-
-/*
- * TODO: "produced=%d consumed=%d dropped=%d sum=%llu last=%u avg=%llu",
- *       avg = consumed ? div_u64(sum, consumed) : 0;
- *       read sum/last_value under ctx->stats_lock.
- */
 static int pc_param_stats_get(char *buffer, const struct kernel_param *kp) {
   struct pc_ctx *ctx = &pc_ctx_global;
 
+  mutex_lock(&ctx->stats_lock);
+  const u64 sum = ctx->sum;
+  const unsigned int last = ctx->last_value;
+  mutex_unlock(&ctx->stats_lock);
+
+  const int consumed = atomic_read(&ctx->consumed);
   return scnprintf(
       buffer, PAGE_SIZE,
-      "produced=%d consumed=%d dropped=%d sum=%llu last=%u avg=%u\n",
-      atomic_read(&ctx->produced), atomic_read(&ctx->consumed),
-      atomic_read(&ctx->dropped), ctx->sum, ctx->last_value, 0u);
+      "produced=%d consumed=%d dropped=%d sum=%llu last=%u avg=%llu\n",
+      atomic_read(&ctx->produced), consumed, atomic_read(&ctx->dropped), sum,
+      last, consumed ? div_u64(sum, consumed) : 0);
 }
 
 static const struct kernel_param_ops pc_stats_ops = {
@@ -207,15 +203,6 @@ module_param_cb(consumer_type, &pc_consumer_type_ops, NULL, 0644);
 MODULE_PARM_DESC(consumer_type, "consumer: 0 = tasklet, 1 = workqueue");
 
 /* --- reset --- */
-
-/*
- * TODO:
- *   1. atomic_cmpxchg(&ctx->running, 0, 1) != 0 -> PC_BUSY;
- *   2. pc_producer_stop(ctx)      -- hrtimer_cancel
- *   3. pc_consumer_teardown(ctx)  -- tasklet_kill / flush + destroy_workqueue
- *   4. kfifo_reset(&ctx->fifo); pc_stats_reset(ctx);
- *   5. atomic_set(&ctx->running, 0);
- */
 static int pc_param_reset_set(const char *val, const struct kernel_param *kp) {
   struct pc_ctx *ctx = &pc_ctx_global;
   int ret;
@@ -224,7 +211,14 @@ static int pc_param_reset_set(const char *val, const struct kernel_param *kp) {
   if (ret)
     return ret;
 
-  (void)ctx;
+  if (atomic_cmpxchg(&ctx->running, 0, 1) != 0)
+    return PC_BUSY;
+
+  pc_producer_stop(ctx);
+  pc_consumer_teardown(ctx);
+  kfifo_reset(&ctx->fifo);
+  pc_stats_reset(ctx);
+  atomic_set(&ctx->running, 0);
   return PC_OK;
 }
 

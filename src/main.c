@@ -51,7 +51,6 @@ MODULE_PARM_DESC(
 static int __init pc_init(void) {
   struct pc_ctx *ctx = &pc_ctx_global;
   int ret;
-  ctx->consumer_type = -1;
   /*
    * consumer_type has already been set by params.c (module parameters are
    * parsed before init), so it is validated but not overwritten here.

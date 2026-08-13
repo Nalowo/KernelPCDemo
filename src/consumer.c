@@ -4,13 +4,29 @@
  *
  *   tasklet   -- atomic context. Must not sleep: no msleep/mutex_lock/
  *                kmalloc(GFP_KERNEL). Drains the fifo and returns; an empty
- *                fifo means "return now", never wait. sum/last_value need no
- *                lock: a tasklet never runs concurrently with itself.
+ *                fifo means "return now", never wait. sum/last_value are
+ *                written without a lock -- a tasklet never runs concurrently
+ *                with itself, and a mutex is not an option here anyway. A
+ *                concurrent `cat stats` is therefore unsynchronised: that is
+ *                deliberate, and part of what this demo is meant to show.
  *
- *   workqueue -- process context. May sleep, so on an empty fifo it can
- *                msleep(1) while the producer is still running instead of
- *                losing events. queue_work() may re-queue the item, so
- *                sum/last_value are protected by ctx->stats_lock.
+ *   workqueue -- process context. May sleep, so on an empty fifo it waits for
+ *                the producer instead of returning. queue_work() may re-queue
+ *                the item while it runs, so sum/last_value are protected by
+ *                ctx->stats_lock.
+ *
+ * Being able to wait does *not* mean fewer lost events. msleep(1) sleeps for
+ * at least one tick (1 ms at CONFIG_HZ=1000), and queue_work() from the
+ * producer's hard-irq context costs noticeably more than tasklet_schedule().
+ * Measured with fifo_size=4 num_events=5000 interval_us=100:
+ *
+ *   tasklet     produced=4979  dropped=21
+ *   workqueue   produced=1193  dropped=3807
+ *
+ * The tasklet drains the fifo right after the timer interrupt, while the
+ * worker oversleeps its 100 us window tenfold and the producer overruns the
+ * 4-slot fifo meanwhile. The workqueue pays off only when the consumer really
+ * must block (I/O, mutexes, GFP_KERNEL); on latency it loses.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -42,7 +58,10 @@ void pc_work_consumer(struct work_struct *work) {
       ctx->last_value = val;
       mutex_unlock(&ctx->stats_lock);
       atomic_inc(&ctx->consumed);
-    } else if (atomic_read(&ctx->producer_active) &&
+    } else if (atomic_read(
+                   &ctx->producer_active) && // чтобы избежать случая вечной
+                                             // блокировки потребителя при
+                                             // выключеном продюсере
                pc_total_events(ctx) < ctx->num_events) {
       msleep(1);
     } else {

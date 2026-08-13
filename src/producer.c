@@ -27,7 +27,7 @@ enum hrtimer_restart pc_producer_timer_fn(struct hrtimer *timer) {
 
   pc_consumer_schedule(ctx);
 
-  if (pc_total_events(ctx) >= ctx->num_events) {
+  if (pc_total_events(ctx) >= ctx->num_events) { // чтобы не пропускать один тик
     wake_up(&ctx->done);
     return HRTIMER_NORESTART;
   }
